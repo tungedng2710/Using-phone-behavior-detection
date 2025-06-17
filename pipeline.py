@@ -1,6 +1,7 @@
 import argparse
 import time
 import cv2
+import os
 import numpy as np
 from ultralytics import YOLO
 
@@ -115,11 +116,21 @@ class MobilePhoneDetection:
     # ------------------------- video util -----------------------------------
     def run_video(self, source: str | int = 0, *, show_fps: bool = True,
                   save_path: str | None = None, show_streaming: bool = True) -> None:
-        cap = cv2.VideoCapture(source)
+        TITLE = "TonAI Computer Vision"
+        if 'rtsp' in str(source):
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;60000000"
+            cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000) 
+            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 0)
+        else:
+            cap = cv2.VideoCapture(source)
+
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video source: {source}")
 
         writer = None
+        cv2.namedWindow(TITLE, cv2.WND_PROP_FULLSCREEN)
+        cv2.setWindowProperty(TITLE, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
         if save_path:
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             fps_src = cap.get(cv2.CAP_PROP_FPS) or 30
@@ -146,7 +157,7 @@ class MobilePhoneDetection:
                     writer.write(annotated)
 
                 if show_streaming and annotated is not None:
-                    cv2.imshow("TonAI Computer Vision", annotated)
+                    cv2.imshow(TITLE, annotated)
                     if cv2.waitKey(1) & 0xFF == 27:
                         break
         except KeyboardInterrupt:
@@ -181,6 +192,6 @@ if __name__ == "__main__":
                                 conf_thresh=args.conf_thresh,
                                 iou_thresh=args.iou_thresh,
                                 device=args.device)
-    pipe.run_video(source=args.source,
+    pipe.run_video(source=args.source, # Source can be RTSP url or file path
                    show_streaming=args.show_streaming,
                    save_path=args.save_path)
