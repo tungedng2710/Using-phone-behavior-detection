@@ -1,195 +1,140 @@
 import argparse
+import time
+import cv2
+import numpy as np
 from ultralytics import YOLO
-import cv2, numpy as np, time, math
-try:
-    from scipy.optimize import linear_sum_assignment
-    _has_scipy = True
-except ImportError:
-    _has_scipy = False
-from utils import iou_matrix, greedy_match
+
+from utils import iou_matrix
+from sort_tracker import Sort
 
 
 class MobilePhoneDetection:
     def __init__(self,
-                 person_model_weights = "yolov8s.pt",
-                 phone_model_weights = "yolov8s.pt",
+                 person_model_weights="yolov8s.pt",
+                 phone_model_weights="yolov8s.pt",
                  conf_thresh=0.25,
                  iou_thresh=0.45,
                  device="cuda"):
         self.person_detector = YOLO(person_model_weights)
         self.phone_detector = YOLO(phone_model_weights)
-        self.conf   = conf_thresh
+        self.tracker = Sort()
+        self.conf = conf_thresh
         self.iou_th = iou_thresh
         self.device = device
         self._mem: list[dict] = []
-        self.retention_secs = 5      
+        self.retention_secs = 5
 
-
-    def _match(self, persons, phones):
-        """
-        Returns list of tuples (p_idx, ph_idx) indicating phone assigned to person.
-        Criterion: maximise IoU  (equiv. minimise -IoU).
-        """
-        if not persons or not phones:
-            return []
-
-        p_xyxy = np.array([p[:4] for p in persons])
-        ph_xyxy = np.array([ph[:4] for ph in phones])
-        ious = iou_matrix(p_xyxy, ph_xyxy)        # NxM
-
-        # Convert to cost matrix (Hungarian minimizes)
-        cost = 1.0 - ious
-        if _has_scipy:
-            row_idx, col_idx = linear_sum_assignment(cost)
-            matches = [(r, c) for r, c in zip(row_idx, col_idx)
-                       if ious[r, c] > 0.0]      # ignore zero overlap matches
-        else:
-            matches = greedy_match(cost)
-            matches = [(r, c) for r, c in matches if ious[r, c] > 0.0]
-        return matches
-    
     # -------------------------- public predict API ---------------------------
-    def predict(
-            self,
-            frame: np.ndarray,
-            *,
-            draw: bool = True,
-            return_crops: bool = True
-        ):
-        """
-        Detect persons → crop → detect phones.
-        Draw persons that are (or were within retention_secs) using a phone.
-        """
+    def predict(self, frame: np.ndarray, *, draw: bool = True, return_crops: bool = True):
+        """Detect persons and phones and optionally draw annotated frame."""
         now = time.time()
 
-        # ------------------------------------------------------------------ #
-        # 1. Person detection                                                #
-        # ------------------------------------------------------------------ #
+        # 1. Person detection
         res_p = self.person_detector.predict(
-            frame, classes=[0], conf=self.conf, iou=self.iou_th, # class id 0: person
-            device=self.device, verbose=False)[0]
+            frame, classes=[0], conf=self.conf, iou=self.iou_th,
+            device=self.device, verbose=False
+        )[0]
 
-        persons, crops, offs = [], [], []
+        persons_det, crops, offs = [], [], []
         for b in res_p.boxes:
             x1, y1, x2, y2 = b.xyxy[0].cpu().numpy().astype(int)
             s = float(b.conf[0])
-            persons.append((x1, y1, x2, y2, s))
-
+            persons_det.append([x1, y1, x2, y2, s])
             if return_crops:
                 x1c, y1c = max(x1, 0), max(y1, 0)
                 x2c, y2c = min(x2, frame.shape[1]), min(y2, frame.shape[0])
                 crops.append(frame[y1c:y2c, x1c:x2c].copy())
                 offs.append((x1c, y1c))
 
-        # ------------------------------------------------------------------ #
-        # 2. Phone detection inside crops                                    #
-        # ------------------------------------------------------------------ #
+        # 2. Tracking persons using SORT
+        det_array = np.array(persons_det) if persons_det else np.empty((0, 5))
+        tracks = self.tracker.update(det_array)
+        track_boxes = {int(t[4]): t[:4].astype(int) for t in tracks}
+
+        # Assign detection index to track id via IoU
+        id_by_det_idx = {}
+        if persons_det:
+            p_boxes = np.array([p[:4] for p in persons_det])
+            for tid, box in track_boxes.items():
+                ious = iou_matrix(np.asarray([box]), p_boxes)[0]
+                idx = int(np.argmax(ious))
+                if ious[idx] >= 0.3:
+                    id_by_det_idx[idx] = tid
+
+        # 3. Phone detection inside crops
         phones = []
         if crops:
             res_ph = self.phone_detector.predict(
-                crops, classes=[67], conf=self.conf, iou=self.iou_th, # class id 67: cell phone
-                device=self.device, verbose=False)
-
+                crops, classes=[67], conf=self.conf, iou=self.iou_th,
+                device=self.device, verbose=False
+            )
             for p_idx, (r, (ox, oy)) in enumerate(zip(res_ph, offs)):
+                tid = id_by_det_idx.get(p_idx)
                 for b in r.boxes:
                     px1, py1, px2, py2 = b.xyxy[0].cpu().numpy().astype(int)
                     s = float(b.conf[0])
-                    phones.append((px1+ox, py1+oy, px2+ox, py2+oy, s, p_idx))
+                    phones.append((px1 + ox, py1 + oy, px2 + ox, py2 + oy, s, tid))
 
-        # ------------------------------------------------------------------ #
-        # 3. Memory update                                                   #
-        # ------------------------------------------------------------------ #
-        phone_owner_idxs = {ph[-1] for ph in phones}
-
-        for idx in phone_owner_idxs:                           # refresh / insert
-            box = persons[idx][:4]
-            matched = False
+        # 4. Memory update of phone usage
+        phone_owner_ids = {ph[-1] for ph in phones if ph[-1] is not None}
+        for tid in phone_owner_ids:
+            box = track_boxes.get(tid)
+            if box is None:
+                continue
+            found = False
             for mem in self._mem:
-                if iou_matrix(np.asarray([mem["bbox"]]), np.asarray([box]))[0, 0] >= 0.5:
-                    mem["bbox"], mem["ts"], matched = box, now, True
+                if mem["id"] == tid:
+                    mem["bbox"], mem["ts"], found = box, now, True
                     break
-            if not matched:
-                self._mem.append({"bbox": box, "ts": now})
+            if not found:
+                self._mem.append({"id": tid, "bbox": box, "ts": now})
 
-        # drop expired
         self._mem = [m for m in self._mem if now - m["ts"] <= self.retention_secs]
 
-        # ------------------------------------------------------------------ #
-        # 4. Drawing                                                         #
-        # ------------------------------------------------------------------ #
+        # 5. Drawing annotations
         annotated = None
         if draw:
             canvas = frame.copy()
-
-            # current phone users
-            for idx in phone_owner_idxs:
-                x1, y1, x2, y2, s = persons[idx]
-                cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(canvas, f"Person {s:.2f}", (x1, y1-6),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-
-            for (x1, y1, x2, y2, s, p_idx) in phones:
-                cv2.rectangle(canvas, (x1, y1), (x2, y2), (255, 0, 0), 2)
-                cv2.putText(canvas, f"Phone {s:.2f}", (x1, y1-6),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
-
-                px1, py1, px2, py2, _ = persons[p_idx]
-                cv2.line(canvas,
-                        ((px1+px2)//2, (py1+py2)//2),
-                        ((x1+x2)//2,  (y1+y2)//2),
-                        (0, 255, 255), 1)
-
-            # remembered persons (no phone this frame, still within 5 s)
-            for mem in self._mem:
-                box = mem["bbox"]
-                if any(iou_matrix(np.asarray([box]), 
-                                np.asarray([persons[i][:4]]))[0, 0] >= 0.9
-                    for i in phone_owner_idxs):
-                    continue
+            for tid, box in track_boxes.items():
                 x1, y1, x2, y2 = box
+                color = (0, 255, 0) if tid in phone_owner_ids else (0, 180, 0)
+                cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(canvas, f"ID {tid}", (x1, y1 - 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            for (x1, y1, x2, y2, s, tid) in phones:
+                cv2.rectangle(canvas, (x1, y1), (x2, y2), (255, 0, 0), 2)
+                cv2.putText(canvas, f"Phone {s:.2f}", (x1, y1 - 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+                if tid is not None and tid in track_boxes:
+                    px1, py1, px2, py2 = track_boxes[tid]
+                    cv2.line(canvas,
+                            ((px1 + px2) // 2, (py1 + py2) // 2),
+                            ((x1 + x2) // 2, (y1 + y2) // 2),
+                            (0, 255, 255), 1)
+            for mem in self._mem:
+                if mem["id"] in phone_owner_ids:
+                    continue
+                x1, y1, x2, y2 = mem["bbox"]
                 cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 180, 0), 2)
-
             annotated = canvas
 
-        return (
-            persons,
-            phones,
-            crops if return_crops else None,
-            annotated
-        )
+        tracked_persons = [(box[0], box[1], box[2], box[3], tid)
+                           for tid, box in track_boxes.items()]
+        return tracked_persons, phones, (crops if return_crops else None), annotated
 
-    # ------------------------------------------------------------------ #
-    # 5. Live video streaming                                            #
-    # ------------------------------------------------------------------ #
-    def run_video(
-            self,
-            source: str | int = 0,
-            *,
-            show_fps: bool = True,
-            save_path: str | None = None,
-            show_streaming: bool = True
-        ) -> None:
-        """
-        Stream inference on a webcam / file / RTSP URL.
-
-        Args
-        ----
-        source          Path / URL / camera index (default 0 = first webcam).
-        show_fps        Overlay instantaneous FPS on the frame.
-        save_path       If given, writes annotated video to this path (codec mp4v).
-        show_streaming  If False, skips cv2.imshow (useful for headless servers).
-        """
+    # ------------------------- video util -----------------------------------
+    def run_video(self, source: str | int = 0, *, show_fps: bool = True,
+                  save_path: str | None = None, show_streaming: bool = True) -> None:
         cap = cv2.VideoCapture(source)
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video source: {source}")
 
-        # Optional writer
         writer = None
         if save_path:
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             fps_src = cap.get(cv2.CAP_PROP_FPS) or 30
-            w, h    = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            writer  = cv2.VideoWriter(save_path, fourcc, fps_src, (w, h))
+            w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            writer = cv2.VideoWriter(save_path, fourcc, fps_src, (w, h))
 
         try:
             print("Object detection is running...")
@@ -202,23 +147,20 @@ class MobilePhoneDetection:
                 *_, annotated = self.predict(frame, draw=True)
                 dt = time.time() - t0
 
-                if show_fps:
+                if show_fps and annotated is not None:
                     fps = 1.0 / (dt + 1e-6)
                     cv2.putText(annotated, f"FPS: {fps:.2f}", (10, 30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-                if writer:
+                if writer and annotated is not None:
                     writer.write(annotated)
 
-                if show_streaming:
+                if show_streaming and annotated is not None:
                     cv2.imshow("TonAI Computer Vision", annotated)
-                    # Quit on ESC
                     if cv2.waitKey(1) & 0xFF == 27:
                         break
-                    
         except KeyboardInterrupt:
             print("Interrupted by user")
-            
         finally:
             print("Finished!")
             cap.release()
