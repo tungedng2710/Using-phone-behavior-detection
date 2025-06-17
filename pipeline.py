@@ -94,28 +94,18 @@ class MobilePhoneDetection:
         # 5. Drawing annotations
         annotated = None
         if draw:
+            # Draw only persons that are detected with a phone. The phone
+            # bounding boxes themselves are skipped so that a single rectangle
+            # is shown around each phone user.
             canvas = frame.copy()
-            for tid, box in track_boxes.items():
-                x1, y1, x2, y2 = box
-                color = (0, 255, 0) if tid in phone_owner_ids else (0, 180, 0)
-                cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(canvas, f"ID {tid}", (x1, y1 - 6),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-            for (x1, y1, x2, y2, s, tid) in phones:
-                cv2.rectangle(canvas, (x1, y1), (x2, y2), (255, 0, 0), 2)
-                cv2.putText(canvas, f"Phone {s:.2f}", (x1, y1 - 6),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
-                if tid is not None and tid in track_boxes:
-                    px1, py1, px2, py2 = track_boxes[tid]
-                    cv2.line(canvas,
-                            ((px1 + px2) // 2, (py1 + py2) // 2),
-                            ((x1 + x2) // 2, (y1 + y2) // 2),
-                            (0, 255, 255), 1)
-            for mem in self._mem:
-                if mem["id"] in phone_owner_ids:
+            for tid in phone_owner_ids:
+                box = track_boxes.get(tid)
+                if box is None:
                     continue
-                x1, y1, x2, y2 = mem["bbox"]
-                cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 180, 0), 2)
+                x1, y1, x2, y2 = box
+                cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(canvas, f"ID {tid}", (x1, y1 - 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
             annotated = canvas
 
         tracked_persons = [(box[0], box[1], box[2], box[3], tid)
