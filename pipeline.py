@@ -95,18 +95,15 @@ class MobilePhoneDetection:
         # 5. Drawing annotations
         annotated = None
         if draw:
-            # Draw only persons that are detected with a phone. The phone
-            # bounding boxes themselves are skipped so that a single rectangle
-            # is shown around each phone user.
             canvas = frame.copy()
             for tid in phone_owner_ids:
                 box = track_boxes.get(tid)
                 if box is None:
                     continue
                 x1, y1, x2, y2 = box
-                cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(canvas, f"ID {tid}", (x1, y1 - 6),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                cv2.rectangle(canvas, (x1, y1), (x2, y2), (255, 255, 0), 2)
+                cv2.putText(canvas, f"ID {tid} | Person", (x1, y1 - 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
             annotated = canvas
 
         tracked_persons = [(box[0], box[1], box[2], box[3], tid)
@@ -117,20 +114,22 @@ class MobilePhoneDetection:
     def run_video(self, source: str | int = 0, *, show_fps: bool = True,
                   save_path: str | None = None, show_streaming: bool = True) -> None:
         TITLE = "TonAI Computer Vision"
-        if 'rtsp' in str(source):
+        if 'rtsp://' in str(source):
             os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;60000000"
             cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
-            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000) 
+            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
             cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 0)
         else:
             cap = cv2.VideoCapture(source)
 
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video source: {source}")
-
+        
+        if show_streaming:
+            cv2.namedWindow(TITLE, cv2.WND_PROP_FULLSCREEN)
+            cv2.setWindowProperty(TITLE, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+            
         writer = None
-        cv2.namedWindow(TITLE, cv2.WND_PROP_FULLSCREEN)
-        cv2.setWindowProperty(TITLE, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
         if save_path:
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             fps_src = cap.get(cv2.CAP_PROP_FPS) or 30

@@ -1,4 +1,4 @@
 # AGENTS instructions
 
 # Add features
-Add object tracking with SORT Algorithm
+After detected person using phone, keep the box id for 5 seconds (no need re-detection)
