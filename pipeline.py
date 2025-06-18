@@ -42,8 +42,18 @@ class MobilePhoneDetection:
             s = float(b.conf[0])
             persons_det.append([x1, y1, x2, y2, s])
             if return_crops:
-                x1c, y1c = max(x1, 0), max(y1, 0)
-                x2c, y2c = min(x2, frame.shape[1]), min(y2, frame.shape[0])
+                # create square crop zoomed in to 80% of the bounding box
+                w, h = x2 - x1, y2 - y1
+                cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                side = int(min(w, h) * 0.8)
+                side = max(side, 1)
+                x1c = int(cx - side / 2)
+                y1c = int(cy - side / 2)
+                x2c = int(cx + side / 2)
+                y2c = int(cy + side / 2)
+                x1c, y1c = max(x1c, 0), max(y1c, 0)
+                x2c = min(x2c, frame.shape[1])
+                y2c = min(y2c, frame.shape[0])
                 crops.append(frame[y1c:y2c, x1c:x2c].copy())
                 offs.append((x1c, y1c))
 
