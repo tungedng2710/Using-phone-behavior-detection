@@ -90,16 +90,21 @@ class MobilePhoneDetection:
             if not found:
                 self._mem.append({"id": tid, "bbox": box, "ts": now})
 
+        for mem in self._mem:
+            tid = mem["id"]
+            box = track_boxes.get(tid)
+            if box is not None:
+                mem["bbox"] = box
+
         self._mem = [m for m in self._mem if now - m["ts"] <= self.retention_secs]
 
         # 5. Drawing annotations
         annotated = None
         if draw:
             canvas = frame.copy()
-            for tid in phone_owner_ids:
-                box = track_boxes.get(tid)
-                if box is None:
-                    continue
+            for mem in self._mem:
+                tid = mem["id"]
+                box = mem["bbox"]
                 x1, y1, x2, y2 = box
                 cv2.rectangle(canvas, (x1, y1), (x2, y2), (255, 255, 0), 2)
                 cv2.putText(canvas, f"ID {tid} | Person", (x1, y1 - 6),
