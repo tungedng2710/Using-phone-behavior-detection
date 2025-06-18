@@ -19,3 +19,6 @@ From your Terminal, just run
 ```bash
 bash run_pipeline.sh
 ```
+
+The pipeline keeps the bounding box of any person detected using a phone for
+five seconds even if the phone is not detected in subsequent frames.
