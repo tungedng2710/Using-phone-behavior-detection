@@ -42,18 +42,47 @@ class MobilePhoneDetection:
             s = float(b.conf[0])
             persons_det.append([x1, y1, x2, y2, s])
             if return_crops:
-                # create square crop zoomed in to 80% of the bounding box
+                # --- parameters you may want to tune -----------------------------
+                ZOOM_RATIO      = 1.0   # keep 80 % of the shortest side
+                TORSO_CENTER_Y  = 0.55   # 0 = top of bbox, 1 = bottom → 0.55 ≈ torso
+                # -----------------------------------------------------------------
+
                 w, h = x2 - x1, y2 - y1
-                cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-                side = int(min(w, h) * 0.8)
-                side = max(side, 1)
+
+                # horizontal centre stays the same
+                cx = x1 + w * 0.5
+                # but vertical centre is shifted a bit downward toward the torso
+                cy = y1 + h * TORSO_CENTER_Y
+
+                # side length of the (zoomed-in) square crop
+                side = int(min(w, h) * ZOOM_RATIO)
+                side = max(side, 1)  # avoid zero
+
+                # tentative crop coordinates
                 x1c = int(cx - side / 2)
                 y1c = int(cy - side / 2)
-                x2c = int(cx + side / 2)
-                y2c = int(cy + side / 2)
+                x2c = x1c + side
+                y2c = y1c + side
+
+                # keep the square fully inside the frame by translating it if needed
+                if x1c < 0:
+                    x2c -= x1c
+                    x1c = 0
+                if y1c < 0:
+                    y2c -= y1c
+                    y1c = 0
+                if x2c > frame.shape[1]:
+                    x1c -= (x2c - frame.shape[1])
+                    x2c = frame.shape[1]
+                if y2c > frame.shape[0]:
+                    y1c -= (y2c - frame.shape[0])
+                    y2c = frame.shape[0]
+
+                # final clamp (in case the frame is smaller than the desired crop)
                 x1c, y1c = max(x1c, 0), max(y1c, 0)
                 x2c = min(x2c, frame.shape[1])
                 y2c = min(y2c, frame.shape[0])
+
                 crops.append(frame[y1c:y2c, x1c:x2c].copy())
                 offs.append((x1c, y1c))
 
@@ -69,7 +98,7 @@ class MobilePhoneDetection:
             for tid, box in track_boxes.items():
                 ious = iou_matrix(np.asarray([box]), p_boxes)[0]
                 idx = int(np.argmax(ious))
-                if ious[idx] >= 0.3:
+                if ious[idx] >= 0.5:
                     id_by_det_idx[idx] = tid
 
         # 3. Phone detection inside crops
