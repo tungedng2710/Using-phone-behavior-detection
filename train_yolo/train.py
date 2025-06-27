@@ -13,11 +13,7 @@ MINIO_ACCESS_KEY = 'minioadmin'
 MINIO_SECRET_KEY = 'minioadmin'
 MINIO_BUCKET = 'iva'
 FOLDER_PATH = './runs'
-# MLflow configuration
-MLFLOW_URI          = "http://0.0.0.0:5000"
-MLFLOW_EXPERIMENT   = "ultralytics-yolo"
-MLFLOW_ARTIFACT_KEY = "artifacts" 
-
+# Use MLFlow for monitoring
 settings.update({"mlflow": True})
 
 def upload_folder_to_minio(client: Minio, bucket: str, local_dir: Path, prefix: str = "") -> None:
@@ -30,9 +26,9 @@ def upload_folder_to_minio(client: Minio, bucket: str, local_dir: Path, prefix: 
 class YOLOTrainer:
     def __init__(self, model_path: str, data_path: str):
         assert model_path, "model_path must not be empty"
-        assert data_path,  "data_path  must not be empty"
-
-        self.client = None                   # default: no object storage
+        assert data_path,  "data_path must not be empty"
+        self.model_path = model_path
+        self.client = None # default: no object storage
         if MINIO_ENDPOINT:
             try:
                 client = Minio(
@@ -61,7 +57,13 @@ class YOLOTrainer:
     def train(self, epochs=100, imgsz=640, batch=32, device=[0], cache=False,
                 workers=8, project=None, name=None, pretrained=True, resume=False,
                 optimizer="auto", classes=None, lr0=0.01, lrf=0.01, cos_lr=False,
-                momentum=0.937, weight_decay=0.0005, warmup_epochs=3.0):
+                momentum=0.937, weight_decay=0.0005, warmup_epochs=3.0, auto_set_name=True):
+        if auto_set_name:
+            from datetime import datetime
+            ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            model_tag = os.path.basename(self.model_path).split('.')[0]
+            data_tag  = os.path.basename(self.data).split('.')[0]
+            name = f"{model_tag}_{data_tag}_{epochs}eps_{imgsz}_{ts}"
         results = self.model.train(data=self.data,
                                     batch=batch,
                                     epochs=epochs,
@@ -93,4 +95,4 @@ if __name__ == "__main__":
         os.makedirs("./datasets")
     trainer = YOLOTrainer(model_path='./weights/yolo11n.pt',
                           data_path="./datasets/mobile_phone_v1.2/data.yaml")
-    trainer.train(epochs=3, batch=128, device=1, pretrained=True, name="phone1")
+    trainer.train(epochs=3, batch=128, device=1, pretrained=True)
