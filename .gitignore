@@ -196,3 +196,7 @@ cython_debug/
 *.mp4
 *.pt
 run.sh
+
+train_yolo/datasets
+train_yolo/runs
+train_yolo/weights/*.pt

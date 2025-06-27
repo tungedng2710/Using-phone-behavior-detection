@@ -14,10 +14,10 @@
     ```
 
 ## Usage
+Copy the `run.example.sh` to `run.sh`
 From your Terminal, just run
-
 ```bash
-bash run_pipeline.sh
+bash run.sh
 ```
 
 Example script:
@@ -31,5 +31,4 @@ python pipeline.py \
 
 the `source` can be webcam (0), rtsp url or file path
 
-The pipeline keeps the bounding box of any person detected using a phone for
-five seconds even if the phone is not detected in subsequent frames.
+The pipeline keeps the bounding box of any person detected using a phone for five seconds even if the phone is not detected in subsequent frames.

@@ -5,8 +5,8 @@ import os
 import numpy as np
 from ultralytics import YOLO
 
-from utils import iou_matrix
-from sort_tracker import Sort
+from utils.utils import iou_matrix
+from utils.sort_tracker import Sort
 
 
 class MobilePhoneDetection:
