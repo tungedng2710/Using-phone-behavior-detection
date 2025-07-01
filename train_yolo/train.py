@@ -76,7 +76,7 @@ class YOLOTrainer:
         results = self.model.train(data=self.data, **kwargs)
 
         # upload artifacts
-        if self.client:
+        if self.client and results:
             run_dir = Path(results.save_dir)
             prefix  = f"{MINIO_PREFIX}/{run_dir.name}"
             upload_folder_to_minio(self.client, MINIO_BUCKET, run_dir, prefix)
