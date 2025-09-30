@@ -105,7 +105,7 @@ class MobilePhoneDetection:
         phones = []
         if crops:
             res_ph = self.phone_detector.predict(
-                crops, classes=[67], conf=self.conf, iou=self.iou_th,
+                crops, classes=[0], conf=self.conf, iou=self.iou_th, # set classes=[67] for model trained on COCO
                 device=self.device, verbose=False
             )
             for p_idx, (r, (ox, oy)) in enumerate(zip(res_ph, offs)):
