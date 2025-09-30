@@ -5,9 +5,6 @@ import os
 import numpy as np
 from ultralytics import YOLO
 
-from utils.utils import iou_matrix
-from utils.sort_tracker import Sort
-
 
 class MobilePhoneDetection:
     def __init__(self,
@@ -18,17 +15,13 @@ class MobilePhoneDetection:
                  device="cuda"):
         self.person_detector = YOLO(person_model_weights)
         self.phone_detector = YOLO(phone_model_weights)
-        self.tracker = Sort()
         self.conf = conf_thresh
         self.iou_th = iou_thresh
         self.device = device
-        self._mem: list[dict] = []
-        self.retention_secs = 5
 
     # -------------------------- public predict API ---------------------------
     def predict(self, frame: np.ndarray, *, draw: bool = True, return_crops: bool = True):
         """Detect persons and phones and optionally draw annotated frame."""
-        now = time.time()
 
         # 1. Person detection
         res_p = self.person_detector.predict(
@@ -36,70 +29,31 @@ class MobilePhoneDetection:
             device=self.device, verbose=False
         )[0]
 
-        persons_det, crops, offs = [], [], []
+        persons_det, crops, offs, crop_indices = [], [], [], []
         for b in res_p.boxes:
             x1, y1, x2, y2 = b.xyxy[0].cpu().numpy().astype(int)
             s = float(b.conf[0])
+            det_idx = len(persons_det)
             persons_det.append([x1, y1, x2, y2, s])
             if return_crops:
-                # --- parameters you may want to tune -----------------------------
-                ZOOM_RATIO      = 1.0   # keep 80 % of the shortest side
-                TORSO_CENTER_Y  = 0.55   # 0 = top of bbox, 1 = bottom → 0.55 ≈ torso
-                # -----------------------------------------------------------------
+                width = max(x2 - x1, 1)
+                expand = int(round(width * 0.20))
+                frame_h, frame_w = frame.shape[:2]
 
-                w, h = x2 - x1, y2 - y1
+                x1c = max(x1 - expand, 0)
+                x2c = min(x2 + expand, frame_w)
+                y1c = max(y1, 0)
+                y2c = min(y2, frame_h)
 
-                # horizontal centre stays the same
-                cx = x1 + w * 0.5
-                # but vertical centre is shifted a bit downward toward the torso
-                cy = y1 + h * TORSO_CENTER_Y
-
-                # side length of the (zoomed-in) square crop
-                side = int(min(w, h) * ZOOM_RATIO)
-                side = max(side, 1)  # avoid zero
-
-                # tentative crop coordinates
-                x1c = int(cx - side / 2)
-                y1c = int(cy - side / 2)
-                x2c = x1c + side
-                y2c = y1c + side
-
-                # keep the square fully inside the frame by translating it if needed
-                if x1c < 0:
-                    x2c -= x1c
-                    x1c = 0
-                if y1c < 0:
-                    y2c -= y1c
-                    y1c = 0
-                if x2c > frame.shape[1]:
-                    x1c -= (x2c - frame.shape[1])
-                    x2c = frame.shape[1]
-                if y2c > frame.shape[0]:
-                    y1c -= (y2c - frame.shape[0])
-                    y2c = frame.shape[0]
-
-                # final clamp (in case the frame is smaller than the desired crop)
-                x1c, y1c = max(x1c, 0), max(y1c, 0)
-                x2c = min(x2c, frame.shape[1])
-                y2c = min(y2c, frame.shape[0])
+                if x2c <= x1c or y2c <= y1c:
+                    continue
 
                 crops.append(frame[y1c:y2c, x1c:x2c].copy())
                 offs.append((x1c, y1c))
+                crop_indices.append(det_idx)
 
-        # 2. Tracking persons using SORT
-        det_array = np.array(persons_det) if persons_det else np.empty((0, 5))
-        tracks = self.tracker.update(det_array)
-        track_boxes = {int(t[4]): t[:4].astype(int) for t in tracks}
-
-        # Assign detection index to track id via IoU
-        id_by_det_idx = {}
-        if persons_det:
-            p_boxes = np.array([p[:4] for p in persons_det])
-            for tid, box in track_boxes.items():
-                ious = iou_matrix(np.asarray([box]), p_boxes)[0]
-                idx = int(np.argmax(ious))
-                if ious[idx] >= 0.5:
-                    id_by_det_idx[idx] = tid
+        # 2. Trackless association placeholders
+        person_has_phone = [False] * len(persons_det)
 
         # 3. Phone detection inside crops
         phones = []
@@ -108,56 +62,40 @@ class MobilePhoneDetection:
                 crops, classes=[0], conf=self.conf, iou=self.iou_th, # set classes=[67] for model trained on COCO
                 device=self.device, verbose=False
             )
-            for p_idx, (r, (ox, oy)) in enumerate(zip(res_ph, offs)):
-                tid = id_by_det_idx.get(p_idx)
+            for r, (ox, oy), det_idx in zip(res_ph, offs, crop_indices):
+                tid = det_idx
                 for b in r.boxes:
                     px1, py1, px2, py2 = b.xyxy[0].cpu().numpy().astype(int)
                     s = float(b.conf[0])
+                    person_has_phone[det_idx] = True
                     phones.append((px1 + ox, py1 + oy, px2 + ox, py2 + oy, s, tid))
 
-        # 4. Memory update of phone usage
-        phone_owner_ids = {ph[-1] for ph in phones if ph[-1] is not None}
-        for tid in phone_owner_ids:
-            box = track_boxes.get(tid)
-            if box is None:
-                continue
-            found = False
-            for mem in self._mem:
-                if mem["id"] == tid:
-                    mem["bbox"], mem["ts"], found = box, now, True
-                    break
-            if not found:
-                self._mem.append({"id": tid, "bbox": box, "ts": now})
-
-        for mem in self._mem:
-            tid = mem["id"]
-            box = track_boxes.get(tid)
-            if box is not None:
-                mem["bbox"] = box
-
-        self._mem = [m for m in self._mem if now - m["ts"] <= self.retention_secs]
-
-        # 5. Drawing annotations
+        # 4. Drawing annotations
         annotated = None
         if draw:
             canvas = frame.copy()
-            for mem in self._mem:
-                tid = mem["id"]
-                box = mem["bbox"]
-                x1, y1, x2, y2 = box
+            for idx, has_phone in enumerate(person_has_phone):
+                if not has_phone:
+                    continue
+                x1, y1, x2, y2, _ = persons_det[idx]
                 cv2.rectangle(canvas, (x1, y1), (x2, y2), (255, 255, 0), 2)
-                cv2.putText(canvas, f"ID {tid} | Person", (x1, y1 - 6),
+                cv2.putText(canvas, f"ID {idx} | Phone", (x1, y1 - 6),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
             annotated = canvas
 
-        tracked_persons = [(box[0], box[1], box[2], box[3], tid)
-                           for tid, box in track_boxes.items()]
+        tracked_persons = []
+        for idx, has_phone in enumerate(person_has_phone):
+            if not has_phone:
+                continue
+            x1, y1, x2, y2, _ = persons_det[idx]
+            tracked_persons.append((x1, y1, x2, y2, idx))
         return tracked_persons, phones, (crops if return_crops else None), annotated
 
     # ------------------------- video util -----------------------------------
     def run_video(self, source: str | int = 0, *, show_fps: bool = True,
                   save_path: str | None = None, show_streaming: bool = True) -> None:
         TITLE = "TonAI Computer Vision"
+        total_frames = 0
         if 'rtsp://' in str(source):
             os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;60000000"
             cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
@@ -165,6 +103,7 @@ class MobilePhoneDetection:
             cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 0)
         else:
             cap = cv2.VideoCapture(source)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video source: {source}")
@@ -183,6 +122,8 @@ class MobilePhoneDetection:
         try:
             print("Object detection is running...")
             while True:
+                if total_frames > 0:
+                    print(f"Progress: {int(cap.get(cv2.CAP_PROP_POS_FRAMES))}/{total_frames} frames", end='\r')
                 ret, frame = cap.read()
                 if not ret:
                     break
@@ -218,7 +159,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", type=str, default=0)
     parser.add_argument("--person_model_weights", type=str, default="weights/yolo12n.pt")
-    parser.add_argument("--phone_model_weights", type=str, default="weights/yolo12l.pt")
+    parser.add_argument("--phone_model_weights", type=str, default="weights/phone_yolov9m_26092025.pt")
     parser.add_argument("--conf_thresh", type=float, default=0.35)
     parser.add_argument("--iou_thresh", type=float, default=0.45)
     parser.add_argument("--device", type=str, default="cuda")

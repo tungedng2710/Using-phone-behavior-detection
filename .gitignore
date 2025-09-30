@@ -202,3 +202,5 @@ train_yolo/runs
 train_yolo/weights/*.pt
 train_yolo/train.sh
 train_yolo/dvc*
+outputs/*
+weights/
